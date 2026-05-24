@@ -1,0 +1,141 @@
+{
+  "name": "branch-explorer",
+  "displayName": "Branch Explorer (btrad)",
+  "description": "btrad-branded combined sidebar panel with a tabbed switcher: (1) Branches tab — local + GitHub branches with mirror status, per-branch pull/push/PR, multi-repo workspace switching, protected-branch safeguards; (2) Actions tab — live GitHub Actions workflow runs grouped by commit with logs/watch/re-run/cancel. Self-updating from GitHub Releases. Styled to match the BT AI Hub site palette. Made by Michael Walding.",
+  "publisher": "local",
+  "author": {
+    "name": "Michael Walding"
+  },
+  "version": "0.5.13",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/michael0120w/Github-Extension.git"
+  },
+  "homepage": "https://github.com/michael0120w/Github-Extension",
+  "bugs": {
+    "url": "https://github.com/michael0120w/Github-Extension/issues"
+  },
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "categories": [
+    "SCM Providers"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "branchExplorer",
+          "title": "Branches",
+          "icon": "media/branch.svg"
+        }
+      ]
+    },
+    "views": {
+      "branchExplorer": [
+        {
+          "type": "webview",
+          "id": "branchExplorer.view",
+          "name": "Branches & Actions"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "branchExplorer.refresh",
+        "title": "Refresh",
+        "category": "Branch Explorer",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "branchExplorer.fetch",
+        "title": "Fetch all (with prune)",
+        "category": "Branch Explorer",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "branchExplorer.pruneGone",
+        "title": "Prune gone branches",
+        "category": "Branch Explorer",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "branchExplorer.showBranchesTab",
+        "title": "Show Branches tab",
+        "category": "Branch Explorer"
+      },
+      {
+        "command": "branchExplorer.showActionsTab",
+        "title": "Show GitHub Actions tab",
+        "category": "Branch Explorer"
+      },
+      {
+        "command": "branchExplorer.refreshActions",
+        "title": "Refresh GitHub Actions (switches to Actions tab)",
+        "category": "Branch Explorer"
+      },
+      {
+        "command": "branchExplorer.openActionsOnGithub",
+        "title": "Open Actions on GitHub",
+        "category": "Branch Explorer",
+        "icon": "$(link-external)"
+      },
+      {
+        "command": "branchExplorer.checkForUpdates",
+        "title": "Check for updates",
+        "category": "Branch Explorer",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "branchExplorer.installUpdate",
+        "title": "Install update from GitHub",
+        "category": "Branch Explorer",
+        "icon": "$(cloud-download)"
+      },
+      {
+        "command": "branchExplorer.showDownloadStats",
+        "title": "Show download stats",
+        "category": "Branch Explorer",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "branchExplorer.commitCurrentBranch",
+        "title": "Commit all uncommitted changes on current branch",
+        "category": "Branch Explorer",
+        "icon": "$(git-commit)"
+      },
+      {
+        "command": "branchExplorer.createBranch",
+        "title": "Create new branch",
+        "category": "Branch Explorer",
+        "icon": "$(add)"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "branchExplorer.fetch",
+          "when": "view == branchExplorer.view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "branchExplorer.refresh",
+          "when": "view == branchExplorer.view",
+          "group": "navigation@2"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Branch Explorer",
+      "properties": {
+        "branchExplorer.ghBinary": {
+          "type": "string",
+          "default": "gh",
+          "description": "Path to the GitHub CLI (gh) binary, used by the GitHub Actions panel (default: assumes gh is on PATH)."
+        }
+      }
+    }
+  }
+}
