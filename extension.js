@@ -243,8 +243,11 @@ class BranchExplorerProvider {
         if (msg.type === 'pullBranch')         return this.pullBranch(msg.branch);
         if (msg.type === 'pushBranch')         return this.pushBranch(msg.branch);
         if (msg.type === 'publishBranch')      return this.publishBranch(msg.branch);
-        if (msg.type === 'commitCurrent')      return this.commitCurrentBranch();
-        if (msg.type === 'createBranch')       return this.createBranch();
+        if (msg.type === 'commitCurrent')      return this.openCommitPanel();
+        if (msg.type === 'commitSubmit')       return this.submitCommit(msg.message);
+        if (msg.type === 'commitShowTerminal') return this.openCommitTerminal(msg.message);
+        if (msg.type === 'createBranch')       return this.openCreateBranchPanel();
+        if (msg.type === 'createBranchSubmit') return this.submitCreateBranch(msg.name, msg.base);
         if (msg.type === 'openPr')             return this.openPr(msg.branch, { fromRemote: msg.fromRemote === true });
         if (msg.type === 'openBranchOnGithub') return this.openBranchOnGithub(msg.branch);
 
@@ -1254,84 +1257,58 @@ class BranchExplorerProvider {
     this.refresh();
   }
 
-  // Prompt for a name, optionally pick a base branch, then create + switch.
+  // Open the in-panel create-branch form (no native Cursor/VS Code prompts).
+  openCreateBranchPanel() {
+    if (!this.view) return;
+    this.view.webview.postMessage({ type: 'openCreateBranchPanel' });
+  }
+
   async createBranch() {
-    const state = await this.collectState();
-    if (state.error) {
-      vscode.window.showErrorMessage(state.error);
-      return;
+    return this.openCreateBranchPanel();
+  }
+
+  async submitCreateBranch(rawName, rawBase) {
+    const fail = (error) => {
+      if (this.view) this.view.webview.postMessage({ type: 'createBranchResult', ok: false, error });
+    };
+    const succeed = () => {
+      if (this.view) this.view.webview.postMessage({ type: 'createBranchResult', ok: true });
+    };
+
+    const name = (rawName || '').trim();
+    const base = (rawBase || '').trim();
+
+    let state;
+    try {
+      state = await this.collectState();
+    } catch (err) {
+      return fail((err && err.message) || String(err));
     }
+    if (state.error) return fail(state.error);
+
+    const validationErr = validateBranchName(name);
+    if (validationErr) return fail(validationErr);
 
     const existingNames = new Set([
       ...(state.branches || []).map((b) => b.name),
       ...(state.remoteOnly || []).map((b) => b.name),
     ]);
-
-    const branchName = await vscode.window.showInputBox({
-      title: 'Create new branch',
-      prompt: `Currently on '${state.currentBranch}'. You'll be switched to the new branch when it's created.`,
-      placeHolder: 'e.g. feature/my-change',
-      ignoreFocusOut: true,
-      validateInput: (v) => {
-        const name = (v || '').trim();
-        const err = validateBranchName(name);
-        if (err) return err;
-        if (existingNames.has(name)) return `Branch '${name}' already exists locally or on GitHub.`;
-        return null;
-      },
-    });
-    if (!branchName) return;
-    const name = branchName.trim();
+    if (existingNames.has(name)) return fail(`Branch '${name}' already exists locally or on GitHub.`);
+    if (!base) return fail('Pick a branch to start from.');
 
     const current = state.currentBranch;
-    const defaultBranch = state.defaultBranch || 'main';
-    const baseItems = [
-      {
-        label: current,
-        description: 'Current branch',
-        detail: 'Create from where you are now',
-        base: current,
-      },
-    ];
-    if (defaultBranch && defaultBranch !== current) {
-      baseItems.push({
-        label: defaultBranch,
-        description: 'Default branch',
-        detail: 'Create from the repo default branch',
-        base: defaultBranch,
-      });
-    }
-    for (const b of (state.branches || [])) {
-      if (b.name === current || b.name === defaultBranch) continue;
-      baseItems.push({ label: b.name, description: 'Local branch', base: b.name });
-    }
-
-    let base = current;
-    if (baseItems.length > 1) {
-      const choice = await vscode.window.showQuickPick(baseItems, {
-        title: `Create '${name}' from which branch?`,
-        placeHolder: `Default: ${current}`,
-      });
-      if (!choice) return;
-      base = choice.base;
-    }
-
     try {
-      await vscode.window.withProgress(
-        { location: vscode.ProgressLocation.Notification, title: `Creating branch '${name}'…` },
-        async () => {
-          if (base === current) {
-            await this.git(['checkout', '-b', name]);
-          } else {
-            await this.git(['checkout', '-b', name, base]);
-          }
-        },
-      );
-      vscode.window.showInformationMessage(`✓ Created and switched to '${name}' (from '${base}').`);
+      if (base === current) {
+        await this.git(['checkout', '-b', name]);
+      } else {
+        await this.git(['checkout', '-b', name, base]);
+      }
+      succeed();
+      this.refresh();
     } catch (err) {
-      throw err;
+      const stderr = (err && err.stderr) ? String(err.stderr).trim() : '';
+      return fail(stderr || (err && err.message) || String(err));
     }
-    this.refresh();
   }
 
   async deleteBranch(branch, force) {
@@ -1438,96 +1415,88 @@ class BranchExplorerProvider {
     this.refresh();
   }
 
-  // One-button "stage everything + commit" flow for the current branch. The
-  // panel only shows the Commit button when the working tree is dirty, but
-  // we re-check here so a keybinding invocation also behaves correctly when
-  // the panel state is stale. Pre-commit hook stderr is surfaced verbatim so
-  // the user can see exactly what blocked the commit (lint errors, secrets,
-  // formatting, etc.).
-  async commitCurrentBranch() {
+  // One-button "stage everything + commit" flow for the current branch.
+  async openCommitPanel() {
+    if (!this.view) return;
     const state = await this.collectState();
     if (state.error) {
-      vscode.window.showErrorMessage(state.error);
+      this.view.webview.postMessage({ type: 'commitResult', ok: false, error: state.error });
       return;
     }
     const wt = state.workingTree;
     if (!wt || wt.total === 0) {
-      vscode.window.showInformationMessage(`Nothing to commit on '${state.currentBranch}' — working tree is clean.`);
+      this.view.webview.postMessage({
+        type: 'commitResult',
+        ok: false,
+        error: `Nothing to commit on '${state.currentBranch}' — working tree is clean.`,
+      });
       return;
     }
     if (wt.conflicts > 0) {
-      vscode.window.showErrorMessage(
-        `Cannot commit: ${wt.conflicts} unresolved conflict${wt.conflicts === 1 ? '' : 's'}. Resolve them first (VS Code Source Control panel handles merge UI).`,
-      );
+      this.view.webview.postMessage({
+        type: 'commitResult',
+        ok: false,
+        error: `Cannot commit: ${wt.conflicts} unresolved conflict${wt.conflicts === 1 ? '' : 's'}. Resolve them first.`,
+      });
       return;
     }
+    this.branchesLastState = state;
+    this.refresh(true, { footerOnly: true });
+    this.view.webview.postMessage({ type: 'openCommitPanel' });
+  }
 
-    const parts = [];
-    if (wt.staged > 0)    parts.push(`${wt.staged} staged`);
-    if (wt.modified > 0)  parts.push(`${wt.modified} modified`);
-    if (wt.untracked > 0) parts.push(`${wt.untracked} untracked`);
-    const summary = parts.join(' · ');
+  async commitCurrentBranch() {
+    return this.openCommitPanel();
+  }
 
-    // Pre-fill a sensible default so hitting Enter immediately becomes a
-    // valid one-keystroke commit. The whole default is selected so the user
-    // can either accept it (Enter), edit it (arrow keys), or replace it
-    // entirely just by typing. Single-file commits get a path-specific
-    // message; multi-file commits get a count.
-    const defaultMsg = wt.total === 1
-      ? `wip: ${wt.files[0].path.split('/').pop() || wt.files[0].path}`
-      : `wip: ${wt.total} changes`;
+  async submitCommit(rawMessage) {
+    const fail = (error, showTerminal = false) => {
+      if (this.view) {
+        this.view.webview.postMessage({ type: 'commitResult', ok: false, error, showTerminal, message: rawMessage });
+      }
+    };
+    const succeed = () => {
+      if (this.view) this.view.webview.postMessage({ type: 'commitResult', ok: true });
+    };
 
-    const message = await vscode.window.showInputBox({
-      title: `Commit ${wt.total} change${wt.total === 1 ? '' : 's'} on '${state.currentBranch}'`,
-      prompt: `Will run: git add -A && git commit -m "<your message>"   (${summary}) — Enter to accept default, or type to replace`,
-      placeHolder: defaultMsg,
-      value: defaultMsg,
-      valueSelection: [0, defaultMsg.length],
-      ignoreFocusOut: true,
-      validateInput: (v) => (v && v.trim().length > 0 ? null : 'Commit message is required.'),
-    });
-    if (!message) return; // User cancelled.
+    const message = (rawMessage || '').trim();
+    if (!message) return fail('Commit message is required.');
+
+    let state;
+    try {
+      state = await this.collectState();
+    } catch (err) {
+      return fail((err && err.message) || String(err));
+    }
+    if (state.error) return fail(state.error);
+
+    const wt = state.workingTree;
+    if (!wt || wt.total === 0) {
+      return fail(`Nothing to commit on '${state.currentBranch}' — working tree is clean.`);
+    }
+    if (wt.conflicts > 0) {
+      return fail(`Cannot commit: ${wt.conflicts} unresolved conflict${wt.conflicts === 1 ? '' : 's'}. Resolve them first.`);
+    }
 
     try {
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: `Committing ${wt.total} change${wt.total === 1 ? '' : 's'} on '${state.currentBranch}'…`,
-        },
-        async () => {
-          // Stage everything (tracked modifications, deletions, untracked
-          // files). Mirrors the "git add -A" intent: the panel's count
-          // includes untracked files, so staging just tracked changes would
-          // surprise the user.
-          await this.git(['add', '-A']);
-          await this.git(['commit', '-m', message]);
-        },
-      );
-      vscode.window.showInformationMessage(`✓ Committed ${wt.total} change${wt.total === 1 ? '' : 's'} on '${state.currentBranch}'.`);
+      await this.git(['add', '-A']);
+      await this.git(['commit', '-m', message]);
+      succeed();
+      this.refresh(true);
     } catch (err) {
-      // Pre-commit hooks (gitleaks, lint-staged, etc.) write the rejection
-      // reason to stderr. Show enough of it to be actionable without
-      // burying the user in a wall of text.
       const stderr = (err && err.stderr) ? String(err.stderr).trim() : '';
       const stdout = (err && err.stdout) ? String(err.stdout).trim() : '';
       const detail = (stderr || stdout || (err && err.message) || String(err)).split('\n').slice(0, 8).join('\n');
-      const choice = await vscode.window.showErrorMessage(
-        `Commit failed: ${detail}`,
-        { modal: false },
-        'Show in terminal',
-        'Dismiss',
-      );
-      if (choice === 'Show in terminal') {
-        const term = vscode.window.createTerminal({ name: 'Branch Explorer · git commit', cwd: this.cwd() });
-        term.show(true);
-        // Re-run via shell so the user sees the hook output live and can
-        // iterate (e.g. amend after the hook auto-fixes formatting).
-        const escaped = message.replace(/"/g, '\\"');
-        term.sendText(`git status && echo '---' && git commit -m "${escaped}"`, true);
-      }
-    } finally {
-      this.refresh(true);
+      return fail(detail || 'Commit failed.', true);
     }
+  }
+
+  openCommitTerminal(message) {
+    const msg = (message || '').trim();
+    const term = vscode.window.createTerminal({ name: 'Branch Explorer · git commit', cwd: this.cwd() });
+    term.show(true);
+    const escaped = msg.replace(/"/g, '\\"');
+    term.sendText('git status && echo \'---\' && git commit -m "' + escaped + '"', true);
   }
 
   async pruneGone() {
@@ -1778,6 +1747,96 @@ function renderFetchFreshness(state) {
   return `<button type="button" class="${cls}" data-action="fetch" title="${tip}">fetched ${label}</button>`;
 }
 
+function buildDefaultCommitMessage(wt) {
+  if (!wt || wt.total === 0) return '';
+  return wt.total === 1
+    ? `wip: ${wt.files[0].path.split('/').pop() || wt.files[0].path}`
+    : `wip: ${wt.total} changes`;
+}
+
+function workingTreeSummary(wt) {
+  if (!wt) return '';
+  const parts = [];
+  if (wt.staged > 0) parts.push(`${wt.staged} staged`);
+  if (wt.modified > 0) parts.push(`${wt.modified} modified`);
+  if (wt.untracked > 0) parts.push(`${wt.untracked} untracked`);
+  if (wt.conflicts > 0) parts.push(`${wt.conflicts} conflict${wt.conflicts === 1 ? '' : 's'}`);
+  return parts.join(' · ');
+}
+
+function renderCreateBranchPanel(state) {
+  const current = state.currentBranch || 'main';
+  const defaultBranch = state.defaultBranch || 'main';
+  const seen = new Set();
+  const options = [];
+  const addOption = (name, label) => {
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    const selected = name === current ? ' selected' : '';
+    options.push(`<option value="${escapeHtml(name)}"${selected}>${escapeHtml(label || name)}</option>`);
+  };
+  addOption(current, `${current} (current)`);
+  if (defaultBranch !== current) addOption(defaultBranch, `${defaultBranch} (default)`);
+  for (const b of (state.branches || [])) addOption(b.name, b.name);
+
+  return `
+    <div id="create-branch-panel" class="inline-panel create-branch-panel hidden" role="form" aria-label="Create new branch">
+      <div class="inline-panel-header">
+        <span class="inline-panel-title">Create new branch</span>
+        <button type="button" class="inline-panel-close" data-action="createBranchCancel" title="Cancel">×</button>
+      </div>
+      <p class="inline-panel-hint">Creates a local branch and switches to it · currently on <strong>${escapeHtml(current)}</strong></p>
+      <label class="field-label" for="create-branch-name">Branch name</label>
+      <input id="create-branch-name" class="field-input" type="text" placeholder="e.g. feature/my-change" autocomplete="off" spellcheck="false" />
+      <label class="field-label" for="create-branch-base">Start from</label>
+      <select id="create-branch-base" class="field-select">${options.join('')}</select>
+      <div id="create-branch-error" class="inline-panel-error hidden" role="alert"></div>
+      <div class="inline-panel-actions">
+        <button type="button" class="primary" data-action="createBranchSubmit">Create branch</button>
+        <button type="button" data-action="createBranchCancel">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderCommitPanel(state) {
+  const wt = state.workingTree;
+  if (!wt || wt.total === 0) return '';
+
+  const summary = workingTreeSummary(wt);
+  const defaultMsg = buildDefaultCommitMessage(wt);
+  const conflictBlocked = wt.conflicts > 0;
+  const previewLines = wt.files.slice(0, 8).map((f) => `${f.code} ${f.path}`);
+  const previewHtml = previewLines.map((line) => `<li>${escapeHtml(line)}</li>`).join('');
+  const moreFiles = wt.files.length > 8
+    ? `<li class="commit-file-more">+${wt.files.length - 8} more file${wt.files.length - 8 === 1 ? '' : 's'}</li>`
+    : '';
+
+  return `
+    <div id="commit-panel" class="inline-panel commit-panel hidden" role="form" aria-label="Commit changes">
+      <div class="inline-panel-header">
+        <span class="inline-panel-title">Commit ${wt.total} change${wt.total === 1 ? '' : 's'}</span>
+        <button type="button" class="inline-panel-close" data-action="commitCancel" title="Cancel">×</button>
+      </div>
+      <p class="inline-panel-hint">On <strong>${escapeHtml(state.currentBranch || 'current branch')}</strong> · ${escapeHtml(summary)} · runs <code>git add -A && git commit</code></p>
+      ${conflictBlocked
+        ? `<div class="inline-panel-error" role="alert">Cannot commit — ${wt.conflicts} unresolved conflict${wt.conflicts === 1 ? '' : 's'}. Resolve them first.</div>`
+        : ''}
+      <label class="field-label" for="commit-message">Commit message</label>
+      <textarea id="commit-message" class="field-textarea" rows="3" placeholder="Describe your changes…" autocomplete="off" spellcheck="true"${conflictBlocked ? ' disabled' : ''}>${escapeHtml(defaultMsg)}</textarea>
+      ${previewHtml ? `<ul class="commit-file-list">${previewHtml}${moreFiles}</ul>` : ''}
+      <div id="commit-error" class="inline-panel-error hidden" role="alert"></div>
+      <div id="commit-terminal-row" class="commit-terminal-row hidden">
+        <button type="button" data-action="commitShowTerminal">Show in terminal</button>
+      </div>
+      <div class="inline-panel-actions">
+        <button type="button" class="primary" data-action="commitSubmit"${conflictBlocked ? ' disabled' : ''}>Commit</button>
+        <button type="button" data-action="commitCancel">Cancel</button>
+      </div>
+    </div>
+  `;
+}
+
 function renderBranchesBody(state) {
   if (state.error) {
     return `<div class="error">${escapeHtml(state.error)}</div>`;
@@ -1862,7 +1921,7 @@ function renderBranchesBody(state) {
       const commitDisabled = wt.conflicts > 0;
       const commitTitle = commitDisabled
         ? `Cannot commit — ${wt.conflicts} unresolved conflict${wt.conflicts === 1 ? '' : 's'}. Resolve them first (e.g. via VS Code's Source Control panel).`
-        : `Commit all ${wt.total} change${wt.total === 1 ? '' : 's'} on '${b.name}' (git add -A && git commit -m <your message>). Opens a prompt for the commit message.`;
+        : `Commit all ${wt.total} change${wt.total === 1 ? '' : 's'} on '${b.name}' in the panel (git add -A && git commit).`;
       commitBtn = commitDisabled
         ? `<button class="link" disabled title="${escapeHtml(commitTitle)}">✎ Commit (${wt.total})</button>`
         : `<button class="link primary-link" data-action="commitCurrent" title="${escapeHtml(commitTitle)}">✎ Commit (${wt.total})</button>`;
@@ -1965,6 +2024,8 @@ function renderBranchesBody(state) {
       <button data-action="fetch" title="git fetch --all --prune — refresh local view of GitHub. Per-branch pull/push live on the row that needs them.">Fetch from GitHub</button>
       ${pruneBtn}
     </div>
+    ${renderCreateBranchPanel(state)}
+    ${renderCommitPanel(state)}
     <div class="row summary">
       <span>${state.branches.length} local</span>
       <span class="meta-sep">·</span>
@@ -2268,6 +2329,121 @@ function baseHtml(csp, nonce, body, footerInner) {
     margin: 10px 0 8px;
   }
   .tab-toolbar button { flex: 1 1 auto; min-width: 80px; }
+  .inline-panel {
+    background: var(--card);
+    border: 1px solid var(--brand-400);
+    border-radius: var(--radius);
+    padding: 12px;
+    margin: 0 0 10px;
+    box-shadow: 0 2px 8px rgba(196, 95, 32, 0.08);
+  }
+  .inline-panel.hidden { display: none; }
+  .inline-panel-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+  }
+  .inline-panel-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--brand-700);
+  }
+  .inline-panel-close {
+    min-width: 28px;
+    width: 28px;
+    height: 28px;
+    padding: 0;
+    font-size: 18px;
+    line-height: 1;
+    border-radius: 9999px;
+    flex: 0 0 auto;
+  }
+  .inline-panel-hint {
+    font-size: 11px;
+    color: var(--fg-muted);
+    margin: 0 0 10px;
+    line-height: 1.4;
+  }
+  .inline-panel-hint code {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    background: rgba(15, 23, 42, 0.06);
+    padding: 1px 4px;
+    border-radius: 4px;
+  }
+  .field-label {
+    display: block;
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    color: var(--fg-muted);
+    margin: 0 0 4px;
+  }
+  .field-input,
+  .field-select,
+  .field-textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: var(--font-body);
+    font-size: 12px;
+    color: var(--fg);
+    background: var(--bg-surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 7px 10px;
+    margin: 0 0 10px;
+  }
+  .field-textarea {
+    min-height: 72px;
+    resize: vertical;
+    line-height: 1.45;
+  }
+  .field-input:focus,
+  .field-select:focus,
+  .field-textarea:focus {
+    outline: none;
+    border-color: var(--brand-500);
+    box-shadow: 0 0 0 2px var(--brand-soft);
+  }
+  .inline-panel-error {
+    font-size: 11px;
+    color: var(--danger);
+    background: var(--danger-soft);
+    border-radius: var(--radius);
+    padding: 6px 8px;
+    margin: 0 0 10px;
+    line-height: 1.35;
+    white-space: pre-wrap;
+  }
+  .inline-panel-error.hidden { display: none; }
+  .inline-panel-actions {
+    display: flex;
+    gap: var(--gap);
+    flex-wrap: wrap;
+  }
+  .inline-panel-actions button { flex: 1 1 auto; min-width: 100px; }
+  .commit-file-list {
+    list-style: none;
+    margin: -4px 0 10px;
+    padding: 8px;
+    max-height: 120px;
+    overflow-y: auto;
+    background: rgba(15, 23, 42, 0.04);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    color: var(--fg-muted);
+    line-height: 1.5;
+  }
+  .commit-file-list li { padding: 1px 0; }
+  .commit-file-more { opacity: 0.75; font-style: italic; }
+  .commit-terminal-row { margin: -4px 0 10px; }
+  .commit-terminal-row.hidden { display: none; }
+  .commit-terminal-row button { width: 100%; }
   button.repo {
     font-size: 12px;
     font-weight: 600;
@@ -2767,6 +2943,153 @@ ${body}
 <div class="footer">${footerInner || `<div class="footer-inner"><span class="brand-mark">btrad</span><span class="footer-sep">·</span><span class="footer-label">Branch Explorer</span><span class="footer-sep">·</span><span class="footer-by">made by Michael Walding</span></div>`}</div>
 <script nonce="${nonce}">
   const vscode = acquireVsCodeApi();
+
+  const createBranchPanel = () => document.getElementById('create-branch-panel');
+  const createBranchNameInput = () => document.getElementById('create-branch-name');
+  const createBranchBaseSelect = () => document.getElementById('create-branch-base');
+  const createBranchErrorEl = () => document.getElementById('create-branch-error');
+  const commitPanel = () => document.getElementById('commit-panel');
+  const commitMessageInput = () => document.getElementById('commit-message');
+  const commitErrorEl = () => document.getElementById('commit-error');
+  const commitTerminalRow = () => document.getElementById('commit-terminal-row');
+  let pendingCommitMessage = '';
+
+  function hideAllInlinePanels() {
+    hideCreateBranchPanel();
+    hideCommitPanel();
+  }
+
+  function showCreateBranchPanel() {
+    const panel = createBranchPanel();
+    if (!panel) return;
+    hideCommitPanel();
+    panel.classList.remove('hidden');
+    hideCreateBranchError();
+    const input = createBranchNameInput();
+    if (input) {
+      input.value = '';
+      input.focus();
+    }
+  }
+
+  function hideCreateBranchPanel() {
+    const panel = createBranchPanel();
+    if (panel) panel.classList.add('hidden');
+    hideCreateBranchError();
+  }
+
+  function showCreateBranchError(message) {
+    const el = createBranchErrorEl();
+    if (!el) return;
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+  }
+
+  function hideCreateBranchError() {
+    showCreateBranchError('');
+  }
+
+  function showCommitPanel() {
+    const panel = commitPanel();
+    if (!panel) return;
+    hideCreateBranchPanel();
+    panel.classList.remove('hidden');
+    hideCommitError();
+    hideCommitTerminalRow();
+    pendingCommitMessage = '';
+    const input = commitMessageInput();
+    if (input && !input.disabled) {
+      input.focus();
+      input.select();
+    }
+  }
+
+  function hideCommitPanel() {
+    const panel = commitPanel();
+    if (panel) panel.classList.add('hidden');
+    hideCommitError();
+    hideCommitTerminalRow();
+    pendingCommitMessage = '';
+  }
+
+  function showCommitError(message) {
+    const el = commitErrorEl();
+    if (!el) return;
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+  }
+
+  function hideCommitError() {
+    showCommitError('');
+  }
+
+  function showCommitTerminalRow(show) {
+    const row = commitTerminalRow();
+    if (!row) return;
+    row.classList.toggle('hidden', !show);
+  }
+
+  function hideCommitTerminalRow() {
+    showCommitTerminalRow(false);
+  }
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data || {};
+    if (msg.type === 'openCreateBranchPanel') showCreateBranchPanel();
+    if (msg.type === 'openCommitPanel') showCommitPanel();
+    if (msg.type === 'createBranchResult') {
+      if (msg.ok) {
+        hideCreateBranchPanel();
+      } else {
+        showCreateBranchError(msg.error || 'Could not create branch.');
+        createBranchPanel()?.classList.remove('hidden');
+        createBranchNameInput()?.focus();
+      }
+    }
+    if (msg.type === 'commitResult') {
+      if (msg.ok) {
+        hideCommitPanel();
+      } else {
+        showCommitError(msg.error || 'Commit failed.');
+        pendingCommitMessage = msg.message || commitMessageInput()?.value || '';
+        showCommitTerminalRow(!!msg.showTerminal);
+        commitPanel()?.classList.remove('hidden');
+        commitMessageInput()?.focus();
+      }
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    const branchPanel = createBranchPanel();
+    const commitPanelEl = commitPanel();
+    const branchOpen = branchPanel && !branchPanel.classList.contains('hidden');
+    const commitOpen = commitPanelEl && !commitPanelEl.classList.contains('hidden');
+    if (!branchOpen && !commitOpen) return;
+
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      if (commitOpen) hideCommitPanel();
+      else hideCreateBranchPanel();
+      return;
+    }
+
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+      if (commitOpen) {
+        e.preventDefault();
+        document.querySelector('[data-action="commitSubmit"]')?.click();
+      }
+      return;
+    }
+
+    if (e.key === 'Enter' && branchOpen) {
+      const target = e.target;
+      if (target && (target.id === 'create-branch-name' || target.id === 'create-branch-base')) {
+        e.preventDefault();
+        document.querySelector('[data-action="createBranchSubmit"]')?.click();
+      }
+    }
+  });
+
   document.addEventListener('click', (e) => {
     // .closest() walks up from the click target and returns the nearest matching
     // element. Buttons inside a clickable row are themselves [data-action], so
@@ -2796,8 +3119,39 @@ ${body}
     if (action === 'pullBranch')          return vscode.postMessage({ type: 'pullBranch', branch });
     if (action === 'pushBranch')          return vscode.postMessage({ type: 'pushBranch', branch });
     if (action === 'publishBranch')       return vscode.postMessage({ type: 'publishBranch', branch });
-    if (action === 'commitCurrent')       return vscode.postMessage({ type: 'commitCurrent' });
-    if (action === 'createBranch')        return vscode.postMessage({ type: 'createBranch' });
+    if (action === 'commitCurrent')       return showCommitPanel();
+    if (action === 'commitCancel')        return hideCommitPanel();
+    if (action === 'commitSubmit') {
+      const message = (commitMessageInput()?.value || '').trim();
+      hideCommitError();
+      hideCommitTerminalRow();
+      pendingCommitMessage = message;
+      if (!message) {
+        showCommitError('Commit message is required.');
+        commitMessageInput()?.focus();
+        return;
+      }
+      return vscode.postMessage({ type: 'commitSubmit', message });
+    }
+    if (action === 'commitShowTerminal') {
+      return vscode.postMessage({
+        type: 'commitShowTerminal',
+        message: pendingCommitMessage || commitMessageInput()?.value || '',
+      });
+    }
+    if (action === 'createBranch')        return showCreateBranchPanel();
+    if (action === 'createBranchCancel')  return hideCreateBranchPanel();
+    if (action === 'createBranchSubmit') {
+      const name = (createBranchNameInput()?.value || '').trim();
+      const base = createBranchBaseSelect()?.value || '';
+      hideCreateBranchError();
+      if (!name) {
+        showCreateBranchError('Branch name is required.');
+        createBranchNameInput()?.focus();
+        return;
+      }
+      return vscode.postMessage({ type: 'createBranchSubmit', name, base });
+    }
     if (action === 'openBranchOnGithub')  return vscode.postMessage({ type: 'openBranchOnGithub', branch });
 
     // Actions tab
