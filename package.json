@@ -6,7 +6,7 @@
   "author": {
     "name": "Michael Walding"
   },
-  "version": "0.5.15",
+  "version": "0.5.27",
   "repository": {
     "type": "git",
     "url": "https://github.com/michael0120w/Github-Extension.git"
@@ -111,6 +111,18 @@
         "title": "Create new branch",
         "category": "Branch Explorer",
         "icon": "$(add)"
+      },
+      {
+        "command": "branchExplorer.rebaseOnDefault",
+        "title": "Rebase current branch on origin/<default>",
+        "category": "Branch Explorer",
+        "icon": "$(git-pull-request)"
+      },
+      {
+        "command": "branchExplorer.reconcileBranch",
+        "title": "Reconcile diverged branch (snap to remote or rebase)",
+        "category": "Branch Explorer",
+        "icon": "$(git-merge)"
       }
     ],
     "menus": {
@@ -134,6 +146,12 @@
           "type": "string",
           "default": "gh",
           "description": "Path to the GitHub CLI (gh) binary, used by the GitHub Actions panel (default: assumes gh is on PATH)."
+        },
+        "branchExplorer.backgroundFetchIntervalSeconds": {
+          "type": "number",
+          "default": 90,
+          "minimum": 30,
+          "description": "How often (in seconds) to silently `git fetch --all --prune` while the Branches panel is visible, so ahead/behind counters reflect what's actually on GitHub. Lower = fresher counts but more network. Set to 300 for once-every-5-minutes. Minimum 30s."
         }
       }
     }

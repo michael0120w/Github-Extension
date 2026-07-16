@@ -1,0 +1,75 @@
+name: downloads
+
+# Regenerates DOWNLOADS.md from the live release asset download_count.
+# Runs every 6 hours, plus on every release, plus on demand.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  release:
+    types: [published, edited, deleted]
+  workflow_dispatch:
+
+# Serialize runs against main so two rapid back-to-back releases can't race
+# to push DOWNLOADS.md. Without this lock, the second run's `git push` was
+# rejected with `cannot lock ref refs/heads/main` because the first run's
+# commit landed in the gap between checkout and push (e.g. v0.5.7 release on
+# 2026-05-19 at 02:14 UTC). `cancel-in-progress: false` queues runs instead
+# of killing them — we want every release event to leave its trace.
+concurrency:
+  group: downloads-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      # Always check out main so we can push the regenerated DOWNLOADS.md.
+      # (On release events the default checkout would land on the tag in
+      # detached-HEAD mode, which can't be pushed.)
+      # v6 runs on Node 24 — satisfies the Sept 2026 deprecation of Node 20
+      # for JavaScript actions (we were getting a runner warning on v4).
+      - uses: actions/checkout@v6
+        with:
+          ref: main
+
+      - name: Regenerate DOWNLOADS.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ./scripts/downloads.sh --markdown > DOWNLOADS.md
+
+      # Commit + push with a self-healing rebase loop. Even with the
+      # workflow-level `concurrency` lock above, a maintainer can push to
+      # main from their laptop while this job is in flight, which would
+      # otherwise reject the push. The loop pulls --rebase and retries up
+      # to 3 times before giving up. `git pull` is safe here because the
+      # only file we touched is DOWNLOADS.md and nothing else in the repo
+      # writes to it from CI or from humans.
+      - name: Commit changes (if any)
+        run: |
+          if [[ -z "$(git status --porcelain DOWNLOADS.md)" ]]; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add DOWNLOADS.md
+          git commit -m "chore(stats): refresh DOWNLOADS.md"
+          for attempt in 1 2 3; do
+            if git push origin main; then
+              echo "Pushed on attempt $attempt."
+              exit 0
+            fi
+            echo "Push attempt $attempt failed — fetching + rebasing and retrying…"
+            git fetch origin main
+            # --autostash is harmless here (we have no local-only edits
+            # post-commit) but keeps the rebase robust if someone adds a
+            # working-tree step before this one in the future.
+            git pull --rebase --autostash origin main
+            sleep $((attempt * 2))
+          done
+          echo "::error::Push failed after 3 rebase-retry attempts."
+          exit 1

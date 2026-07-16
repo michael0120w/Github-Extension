@@ -1,5 +1,11 @@
 # Changelog
 
+## v0.5.27 — 2026-07-16
+
+- Publish Desktop build `0.5.27` to `michael0120w/Github-Extension`
+- Point self-update / repo links at `michael0120w/Github-Extension` (away from the PwC org fork)
+- Include expanded README, download tracking workflow, and webview docs
+
 ## v0.5.15 — 2026-05-24
 
 - **Commit** form now opens inside the sidebar panel (no more editor pop-ups)
